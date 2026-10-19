@@ -74,6 +74,7 @@ const CustomThemeSchema = z.object({
   accent: OklchColorSchema,
   hideDotPattern: z.boolean().optional(),
   pixelatedBackground: z.boolean().optional(),
+  lightBackground: z.boolean().optional(),
 });
 
 export type CustomTheme = z.infer<typeof CustomThemeSchema>;

@@ -72,14 +72,18 @@ export const ThemePlate = ({
   useEffect(() => {
     if (theme.type !== "custom") return;
     let objectUrl: string | null = null;
-    getThemeBackground(theme.name, getDisplayedBackgroundVariant(theme)).then((blob) => {
+    let cancelled = false;
+    setCustomBackgroundUrl(null);
+    getThemeBackground(theme.name, getDisplayedBackgroundVariant(theme, mode)).then((blob) => {
+      if (cancelled) return;
       objectUrl = URL.createObjectURL(blob);
       setCustomBackgroundUrl(objectUrl);
     });
     return () => {
+      cancelled = true;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [theme]);
+  }, [theme, mode]);
 
   const backgroundUrl =
     theme.type === "builtin"

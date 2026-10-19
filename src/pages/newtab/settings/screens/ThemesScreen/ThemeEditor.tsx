@@ -18,6 +18,7 @@ import {
   applyTheme,
   applyThemeColors,
   applyThemeDecorations,
+  deleteLightThemeBackground,
   getThemeBackground,
   getThemeBackgroundOriginal,
   type PartialCustomTheme,
@@ -63,28 +64,39 @@ const captureStillFrame = async (image: Blob): Promise<Blob> => {
   });
 };
 
+const useObjectUrlCleanup = (url: string | null) => {
+  useEffect(() => () => {
+    if (url) URL.revokeObjectURL(url);
+  }, [url]);
+};
+
 export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: CustomTheme; onClose: VoidFunction }) => {
   const loadBackground = async () => {
     const files = await showOpenFilePicker(false, ".jpg,.jpeg,.png,.gif");
     if (!files[0]) return;
     const background = files[0];
-    backgroundPickedRef.current = true;
-    setOriginalBackground(background);
-    applyBlur(theme.blur);
+    backgroundPickedRef.current[previewMode] = true;
+    setOriginalBackground(background, previewMode);
+    await applyBlur(theme.blur, previewMode);
   };
 
-  const applyBlur = useCallback((blur: number) => {
-    if (!originalBackgroundBlob.current) return;
-    const bgUrl = URL.createObjectURL(originalBackgroundBlob.current);
+  const applyBlur = useCallback(async (blur: number, mode: Mode) => {
+    const original = originalBackgroundBlob.current[mode];
+    if (!original) return;
+    const generation = ++blurGenerationRef.current[mode];
     if (blur === 0) {
-      blurredBackgroundBlob.current = originalBackgroundBlob.current;
-      setBackgroundUrl(bgUrl);
-      setPageBackground(bgUrl);
+      blurredBackgroundBlob.current[mode] = original;
+      const url = URL.createObjectURL(original);
+      setBackgroundUrls((prev) => ({ ...prev, [mode]: url }));
+      if (previewModeRef.current === mode || (mode === "dark" && !originalBackgroundBlob.current.light)) {
+        setPageBackground(url);
+      }
       return;
     }
-    const img = new Image();
-    img.src = bgUrl;
-    img.onload = () => {
+    setBakingCount((count) => count + 1);
+    let img: ImageBitmap | null = null;
+    try {
+      img = await createImageBitmap(original);
       const PADDING = blur * 2;
       const canvas = document.createElement("canvas");
       canvas.width = img.width + PADDING * 2;
@@ -105,15 +117,20 @@ export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: Custom
       }
       croppedCtx.drawImage(canvas, PADDING, PADDING, img.width, img.height, 0, 0, img.width, img.height);
 
-      croppedCanvas.toBlob((blob) => {
-        if (!blob) return;
-        blurredBackgroundBlob.current = blob;
-        const url = URL.createObjectURL(blurredBackgroundBlob.current);
-        setBackgroundUrl(url);
+      const blob = await new Promise<Blob>((resolve, reject) => {
+        croppedCanvas.toBlob((result) => (result ? resolve(result) : reject(new Error("couldn't export background"))), "image/png");
+      });
+      if (generation !== blurGenerationRef.current[mode]) return;
+      blurredBackgroundBlob.current[mode] = blob;
+      const url = URL.createObjectURL(blob);
+      setBackgroundUrls((prev) => ({ ...prev, [mode]: url }));
+      if (previewModeRef.current === mode || (mode === "dark" && !originalBackgroundBlob.current.light)) {
         setPageBackground(url);
-        URL.revokeObjectURL(bgUrl);
-      }, "image/png");
-    };
+      }
+    } finally {
+      img?.close();
+      setBakingCount((count) => count - 1);
+    }
   }, []);
 
   const applyPreview = (accent = theme.accent) => {
@@ -122,16 +139,26 @@ export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: Custom
 
   const saveTheme = async () => {
     const id = theme.name;
-    const hasBlobs = !!originalBackgroundBlob.current && !!blurredBackgroundBlob.current;
+    const hasBlobs = !!originalBackgroundBlob.current.dark && !!blurredBackgroundBlob.current.dark;
     if (!themeFromProps && !hasBlobs) return;
 
-    const backgroundChanged = !themeFromProps || backgroundPickedRef.current;
+    const backgroundChanged = !themeFromProps || backgroundPickedRef.current.dark;
     const blurChanged = themeFromProps != null && theme.blur !== themeFromProps.blur;
-    if (backgroundChanged && originalBackgroundBlob.current && blurredBackgroundBlob.current) {
-      await saveThemeBackground(id, "original", originalBackgroundBlob.current);
-      await saveThemeBackground(id, "blurred", blurredBackgroundBlob.current);
-    } else if (blurChanged && blurredBackgroundBlob.current) {
-      await saveThemeBackground(id, "blurred", blurredBackgroundBlob.current);
+    if (backgroundChanged && originalBackgroundBlob.current.dark && blurredBackgroundBlob.current.dark) {
+      await saveThemeBackground(id, "original", originalBackgroundBlob.current.dark);
+      await saveThemeBackground(id, "blurred", blurredBackgroundBlob.current.dark);
+    } else if (blurChanged && blurredBackgroundBlob.current.dark) {
+      await saveThemeBackground(id, "blurred", blurredBackgroundBlob.current.dark);
+    }
+    if (originalBackgroundBlob.current.light && blurredBackgroundBlob.current.light) {
+      if (backgroundPickedRef.current.light) {
+        await saveThemeBackground(id, "light-original", originalBackgroundBlob.current.light);
+      }
+      if (backgroundPickedRef.current.light || blurChanged) {
+        await saveThemeBackground(id, "light-blurred", blurredBackgroundBlob.current.light);
+      }
+    } else if (themeFromProps?.lightBackground) {
+      await deleteLightThemeBackground(id);
     }
 
     const toSave: CustomTheme = {
@@ -141,6 +168,7 @@ export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: Custom
       accent: theme.accent,
       hideDotPattern: theme.hideDotPattern,
       pixelatedBackground: theme.pixelatedBackground,
+      lightBackground: !!originalBackgroundBlob.current.light || undefined,
     };
     const storage = await getAnoriStorage();
     let customThemes = storage.get(anoriSchema.customThemes);
@@ -152,13 +180,12 @@ export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: Custom
     await storage.set(anoriSchema.customThemes, customThemes);
     savedRef.current = true;
     setCurrentTheme(theme.name);
-    applyThemeColors(theme.accent, resolveColorScheme(colorScheme));
-    applyThemeDecorations(toSave);
+    await applyTheme(toSave, resolveColorScheme(colorScheme));
     onClose();
   };
 
   const [colorScheme] = useStorageValue(anoriSchema.colorScheme);
-  const [previewMode, setPreviewMode] = useState<Mode>(() => resolveColorScheme(colorScheme));
+  const [previewMode, setPreviewMode] = useState<Mode>("dark");
   const previewModeRef = useMirrorStateToRef(previewMode);
   const [currentTheme, setCurrentTheme] = useCurrentTheme();
   const currentThemeRef = useMirrorStateToRef(currentTheme);
@@ -187,43 +214,50 @@ export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: Custom
   // biome-ignore lint/correctness/useExhaustiveDependencies: load + bake once per theme; later blur changes bake via the slider's onCommit, not every drag
   useEffect(() => {
     const main = async () => {
+      if (!themeFromProps) return;
       try {
         const original = await getThemeBackgroundOriginal(theme.name);
-        const blurred = await getThemeBackground(theme.name);
-        blurredBackgroundBlob.current = blurred;
-        setOriginalBackground(original);
-        applyBlur(theme.blur);
+        setOriginalBackground(original, "dark");
+        await applyBlur(theme.blur, "dark");
+        if (themeFromProps.lightBackground) {
+          const lightOriginal = await getThemeBackground(theme.name, "light-original");
+          setOriginalBackground(lightOriginal, "light");
+          await applyBlur(theme.blur, "light");
+        }
       } catch (err) {
         console.log("Error while trying to load background", err);
       }
     };
 
     main();
-  }, [applyBlur, theme.name]);
+  }, [applyBlur, theme.name, themeFromProps]);
 
   const { t } = useTranslation();
-  const originalBackgroundBlob = useRef<Blob | null>(null);
-  const blurredBackgroundBlob = useRef<Blob | null>(null);
-  const backgroundPickedRef = useRef(false);
-  const [backgroundUrl, setBackgroundUrl] = useState<string | null>(null);
-  useEffect(() => {
-    return () => (backgroundUrl ? URL.revokeObjectURL(backgroundUrl) : undefined);
-  }, [backgroundUrl]);
-  const [originalUrl, setOriginalUrl] = useState<string | null>(null);
-  useEffect(() => {
-    return () => (originalUrl ? URL.revokeObjectURL(originalUrl) : undefined);
-  }, [originalUrl]);
-  const [stillFrameUrl, setStillFrameUrl] = useState<string | null>(null);
-  useEffect(() => {
-    return () => (stillFrameUrl ? URL.revokeObjectURL(stillFrameUrl) : undefined);
-  }, [stillFrameUrl]);
+  const originalBackgroundBlob = useRef<Record<Mode, Blob | null>>({ dark: null, light: null });
+  const blurredBackgroundBlob = useRef<Record<Mode, Blob | null>>({ dark: null, light: null });
+  const backgroundPickedRef = useRef<Record<Mode, boolean>>({ dark: false, light: false });
+  const blurGenerationRef = useRef<Record<Mode, number>>({ dark: 0, light: 0 });
+  const [bakingCount, setBakingCount] = useState(0);
+  const [backgroundUrls, setBackgroundUrls] = useState<Record<Mode, string | null>>({ dark: null, light: null });
+  const [originalUrls, setOriginalUrls] = useState<Record<Mode, string | null>>({ dark: null, light: null });
+  const [stillFrameUrls, setStillFrameUrls] = useState<Record<Mode, string | null>>({ dark: null, light: null });
+  useObjectUrlCleanup(backgroundUrls.dark);
+  useObjectUrlCleanup(backgroundUrls.light);
+  useObjectUrlCleanup(originalUrls.dark);
+  useObjectUrlCleanup(originalUrls.light);
+  useObjectUrlCleanup(stillFrameUrls.dark);
+  useObjectUrlCleanup(stillFrameUrls.light);
 
-  const setOriginalBackground = (background: Blob) => {
-    originalBackgroundBlob.current = background;
-    setOriginalUrl(URL.createObjectURL(background));
-    setStillFrameUrl(null);
+  const setOriginalBackground = (background: Blob, mode: Mode) => {
+    originalBackgroundBlob.current[mode] = background;
+    setOriginalUrls((prev) => ({ ...prev, [mode]: URL.createObjectURL(background) }));
+    setStillFrameUrls((prev) => ({ ...prev, [mode]: null }));
     captureStillFrame(background)
-      .then((frame) => setStillFrameUrl(URL.createObjectURL(frame)))
+      .then((frame) => {
+        if (originalBackgroundBlob.current[mode] === background) {
+          setStillFrameUrls((prev) => ({ ...prev, [mode]: URL.createObjectURL(frame) }));
+        }
+      })
       .catch((err) => console.log("Error while capturing still frame of background", err));
   };
 
@@ -247,18 +281,22 @@ export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: Custom
   }, []);
 
   const accentRef = useMirrorStateToRef(theme.accent);
-  const backgroundUrlRef = useMirrorStateToRef(backgroundUrl);
+  const backgroundUrlsRef = useMirrorStateToRef(backgroundUrls);
   // Flipping the color scheme makes the global theme watcher re-apply the *active* theme; re-assert
   // the editor's draft preview so the in-progress accent (and background) isn't lost. Refs keep this
   // tied to scheme changes only.
   // biome-ignore lint/correctness/useExhaustiveDependencies: colorScheme is the trigger, not a read value — everything is read via refs so this fires on scheme changes only
   useEffect(() => {
     applyThemeColors(accentRef.current, previewModeRef.current);
-    if (backgroundUrlRef.current) setPageBackground(backgroundUrlRef.current);
+    const url = backgroundUrlsRef.current[previewModeRef.current] ?? backgroundUrlsRef.current.dark;
+    if (url) setPageBackground(url);
   }, [colorScheme]);
 
   const runAfterRender = useRunAfterNextRender();
   const previewBlur = theme.blur * previewScale;
+  const displayedMode = originalUrls[previewMode] ? previewMode : "dark";
+  const originalUrl = originalUrls[displayedMode];
+  const stillFrameUrl = stillFrameUrls[displayedMode];
 
   return (
     <div className={editorPanel}>
@@ -271,13 +309,15 @@ export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: Custom
           onChange={(mode) => {
             setPreviewMode(mode);
             applyThemeColors(theme.accent, mode);
+            const url = backgroundUrls[mode] ?? backgroundUrls.dark;
+            if (url) setPageBackground(url);
           }}
           getOptionKey={(m) => m}
           getOptionLabel={(m) => t(PREVIEW_MODE_LABEL_KEY[m])}
         />
       </Field>
 
-      <Field label={t("settings.theme.colorBackground")}>
+      <Field label={t(previewMode === "light" ? "settings.theme.lightBackground" : "settings.theme.darkBackground")}>
         <div className={backgroundSection}>
           <div ref={previewRef} className={preview}>
             {originalUrl && (
@@ -294,8 +334,24 @@ export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: Custom
           </div>
 
           <DSButton variant="secondary" onClick={loadBackground}>
-            {backgroundUrl ? t("settings.theme.changeBackground") : t("settings.theme.selectBackground")}
+            {originalUrls[previewMode] ? t("settings.theme.changeBackground") : t("settings.theme.selectBackground")}
           </DSButton>
+          {previewMode === "light" && originalUrls.light && (
+            <DSButton
+              variant="secondary"
+              onClick={() => {
+                blurGenerationRef.current.light++;
+                originalBackgroundBlob.current.light = null;
+                blurredBackgroundBlob.current.light = null;
+                setOriginalUrls((prev) => ({ ...prev, light: null }));
+                setStillFrameUrls((prev) => ({ ...prev, light: null }));
+                setBackgroundUrls((prev) => ({ ...prev, light: null }));
+                if (backgroundUrls.dark) setPageBackground(backgroundUrls.dark);
+              }}
+            >
+              {t("settings.theme.useDarkBackground")}
+            </DSButton>
+          )}
         </div>
       </Field>
 
@@ -305,7 +361,10 @@ export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: Custom
           min={0}
           max={50}
           onChange={(val) => setTheme((p) => ({ ...p, blur: val }))}
-          onCommit={(val) => applyBlur(val)}
+          onCommit={(val) => {
+            applyBlur(val, "dark");
+            if (originalBackgroundBlob.current.light) applyBlur(val, "light");
+          }}
         />
       </Field>
 
@@ -344,7 +403,7 @@ export const ThemeEditor = ({ theme: themeFromProps, onClose }: { theme?: Custom
         <DSButton variant="secondary" onClick={onClose}>
           {t("back")}
         </DSButton>
-        <DSButton disabled={!backgroundUrl && !themeFromProps} onClick={saveTheme}>
+        <DSButton disabled={!backgroundUrls.dark || bakingCount > 0} onClick={saveTheme}>
           {t("save")}
         </DSButton>
       </div>

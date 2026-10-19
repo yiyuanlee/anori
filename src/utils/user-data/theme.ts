@@ -72,11 +72,18 @@ export const getThemeBackgroundOriginal = async (themeName: string): Promise<Blo
   return result.blob;
 };
 
+export const deleteLightThemeBackground = async (themeName: string) => {
+  const storage = await getAnoriStorage();
+  await storage.files.delete(anoriSchema.themeBackgrounds.byId(getThemeBackgroundKey(themeName, "light-original")));
+  await storage.files.delete(anoriSchema.themeBackgrounds.byId(getThemeBackgroundKey(themeName, "light-blurred")));
+};
+
 export const deleteThemeBackgrounds = async (themeName: string) => {
   const storage = await getAnoriStorage();
 
   await storage.files.delete(anoriSchema.themeBackgrounds.byId(getThemeBackgroundKey(themeName, "original")));
   await storage.files.delete(anoriSchema.themeBackgrounds.byId(getThemeBackgroundKey(themeName, "blurred")));
+  await deleteLightThemeBackground(themeName);
 };
 
 export const deleteAllThemeBackgrounds = async () => {
@@ -113,7 +120,7 @@ export const watchForThemeUpdates = (storage: AnoriStorage) => {
   const subscribeToCurrentThemeParameters = () => {
     const themeName = storage.get(anoriSchema.theme);
 
-    const backgroundVariants: ThemeBackgroundVariant[] = ["original", "blurred"];
+    const backgroundVariants: ThemeBackgroundVariant[] = ["original", "blurred", "light-original", "light-blurred"];
     const unsubBackgrounds = backgroundVariants.map((variant) =>
       storage.files.subscribe(
         anoriSchema.themeBackgrounds.byId(getThemeBackgroundKey(themeName, variant)),

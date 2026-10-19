@@ -20,6 +20,7 @@ export type CustomTheme = {
   accent: OklchColor;
   hideDotPattern?: boolean;
   pixelatedBackground?: boolean;
+  lightBackground?: boolean;
 };
 
 export type PartialCustomTheme = {
@@ -29,16 +30,24 @@ export type PartialCustomTheme = {
   accent: OklchColor;
   hideDotPattern?: boolean;
   pixelatedBackground?: boolean;
+  lightBackground?: boolean;
   background?: string;
   originalBackground?: string;
 };
 
 export type Theme = BuiltinTheme | CustomTheme;
 
-export type ThemeBackgroundVariant = "original" | "blurred";
+export type ThemeBackgroundVariant = "original" | "blurred" | "light-original" | "light-blurred";
 
-export const getDisplayedBackgroundVariant = (theme: Pick<CustomTheme, "blur">): ThemeBackgroundVariant => {
-  return theme.blur === 0 ? "original" : "blurred";
+export const getDisplayedBackgroundVariant = (
+  theme: Pick<CustomTheme, "blur" | "lightBackground">,
+  mode: Mode,
+): ThemeBackgroundVariant => {
+  const variant = theme.blur === 0 ? "original" : "blurred";
+  if (mode === "light" && theme.lightBackground) {
+    return variant === "original" ? "light-original" : "light-blurred";
+  }
+  return variant;
 };
 
 export type ColorScheme = "light" | "dark" | "system";
@@ -111,12 +120,16 @@ export const applyBuiltinTheme = (themeName: Theme["name"], mode: Mode) => {
   applyTheme(theme, mode);
 };
 
+let themeApplicationVersion = 0;
+
 export const applyTheme = async (theme: Theme, mode: Mode) => {
+  const version = ++themeApplicationVersion;
   let prom = Promise.resolve();
   if (theme.type === "builtin") {
     setPageBackground(browser.runtime.getURL(`/assets/images/backgrounds/${theme.background[mode]}`));
   } else {
-    prom = getThemeBackgroundImpl(theme.name, getDisplayedBackgroundVariant(theme)).then((blob) => {
+    prom = getThemeBackgroundImpl(theme.name, getDisplayedBackgroundVariant(theme, mode)).then((blob) => {
+      if (version !== themeApplicationVersion) return;
       const url = URL.createObjectURL(blob);
       setPageBackground(url);
     });
